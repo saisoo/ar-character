@@ -322,6 +322,12 @@ let lockedFrames = 0;       // 연속으로 안정적으로 인식된 프레임 
 let isLocked = false;
 const LOST_TIMEOUT = 1400;  // 이 시간(ms) 동안 못 찾으면 "인식 끊김" 처리
 
+// ---- 캐릭터 움직임(라쿠가키AR 스타일 - 종이인형처럼 어슬렁+통통 바운스) ----
+let wanderOffsetX = 0, wanderOffsetY = 0;   // 현재 어슬렁 위치(부드럽게 보간됨)
+let wanderTargetX = 0, wanderTargetY = 0;   // 다음에 이동할 목표 위치
+let wanderChangeAt = 0;                     // 다음 목표를 새로 정할 시각
+let facingDir = 1;                          // 1: 기본 방향, -1: 반대 방향(이동 방향에 따라 전환)
+
 // ---------------- 패널 토글 ----------------
 panelToggle.addEventListener('click', () => panel.classList.toggle('open'));
 
@@ -506,26 +512,56 @@ function drawBrackets(box, locked, t) {
   ctx.restore();
 }
 
-// 캐릭터를 얼굴 옆(거울모드 화면 기준 오른쪽)에 홀로그램처럼 배치
+// 얼굴 위치를 중심으로 캐릭터가 어슬렁거릴 목표 지점을 주기적으로 갱신
+function updateWander(t, box) {
+  if (t > wanderChangeAt) {
+    const rangeX = box.width * 1.1;   // 좌우로 어슬렁거리는 범위
+    const rangeY = box.height * 0.3;  // 위아래로는 살짝만
+    wanderTargetX = (Math.random() * 2 - 1) * rangeX;
+    wanderTargetY = (Math.random() * 2 - 1) * rangeY;
+    wanderChangeAt = t + 1800 + Math.random() * 2200; // 1.8~4초마다 새 목적지
+  }
+  const prevX = wanderOffsetX;
+  wanderOffsetX += (wanderTargetX - wanderOffsetX) * 0.02;
+  wanderOffsetY += (wanderTargetY - wanderOffsetY) * 0.02;
+  if (Math.abs(wanderOffsetX - prevX) > 0.015) {
+    facingDir = (wanderOffsetX - prevX) > 0 ? 1 : -1;
+  }
+}
+
+// 캐릭터를 얼굴 옆(거울모드 화면 기준 오른쪽 부근)에 종이인형처럼 살아 움직이게 배치
+// - 걷는 듯한 통통 바운스(스쿼시&스트레치), 뒤뚱거리는 기울임, 좁은 범위 어슬렁거림, 이동방향 전환을 포함
 function drawCharacter(box, t) {
-  const bob = Math.sin(t / 450) * (box.height * 0.04);
+  updateWander(t, box);
+
   const targetH = box.height * 2.1;
   const ratio = characterImg.naturalWidth / characterImg.naturalHeight;
   const targetW = targetH * ratio;
 
+  // 걸음 주기: 0(착지, 스쿼시) ~ 1(공중, 스트레치)
+  const stepRaw = Math.sin(t / 380);
+  const stepPhase = Math.abs(stepRaw);           // 0~1
+  const hopAmp = box.height * 0.10;
+  const bounceY = -stepPhase * hopAmp;            // 튀어오를수록 위로
+  const squashY = 0.92 + stepPhase * 0.16;        // 착지 시 눌리고, 공중에서 늘어남
+  const squashX = 1.08 - stepPhase * 0.14;
+  const tilt = Math.sin(t / 380 + Math.PI / 2) * 0.12; // 뒤뚱거리는 기울임(라디안)
+
   // 화면 전체가 CSS로 거울반전되어 있으므로, 원본(raw) 좌표에서는
   // 얼굴의 "왼쪽"에 배치해야 실제 화면(거울모드)에서는 "오른쪽"에 보인다.
-  const cx = box.x - box.width * 0.35 - targetW / 2;
-  const cy = box.y + box.height * 0.55 + bob;
+  const cx = box.x - box.width * 0.35 - targetW / 2 + wanderOffsetX;
+  const cy = box.y + box.height * 0.55 + wanderOffsetY + bounceY;
 
   ctx.save();
   ctx.shadowColor = getCssVar('--cyan');
   ctx.shadowBlur = 26;
   ctx.globalAlpha = 0.98;
 
-  // 그림 자체가 좌우반전되어 보이지 않도록 내부적으로 한 번 더 반전해 상쇄
   ctx.translate(cx, cy);
-  ctx.scale(-1, 1);
+  ctx.rotate(tilt);
+  // 그림 자체가 화면 거울반전으로 뒤집혀 보이지 않도록 기본 보정(-1)에
+  // 이동 방향(facingDir)을 곱해, 걷는 방향을 바라보도록 좌우를 전환
+  ctx.scale(-1 * facingDir * squashX, squashY);
   ctx.drawImage(characterImg, -targetW / 2, -targetH / 2, targetW, targetH);
   ctx.restore();
 }
