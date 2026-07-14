@@ -403,6 +403,7 @@ function makeHandTrack() {
     pinchX: 0, pinchY: 0, pinchVX: 0, pinchVY: 0, // 엄지+검지 중간점(집게 동작용) + 속도
     isPinching: false,                  // 엄지-검지가 붙어서 "집는" 모양인지
     isOpenPalm: false,                  // 손가락이 펴진 "손바닥" 모양인지
+    pinchRatio: 0, extendedCount: 0,    // 디버그 표시용 원시 수치
     handSize: 60,
     _init: false,
   };
@@ -607,7 +608,7 @@ async function runDetectionLoop() {
           const results = handLandmarker.detectForVideo(video, performance.now());
           updateHandTracks(results, displaySize);
         } catch (err) {
-          // 무시하고 계속 진행
+          console.error('손 인식 처리 중 오류:', err); // 콘솔에서 바로 원인 확인 가능하도록 로그 남김
         }
       }
 
@@ -704,6 +705,8 @@ function updateHandTracks(results, displaySize) {
 
       track.isPinching = isPinching;
       track.isOpenPalm = isOpenPalm;
+      track.pinchRatio = pinchDist;       // 디버그 표시용 원시 수치
+      track.extendedCount = extendedCount; // 디버그 표시용 원시 수치
       track.handSize = handSize;
       track.present = true;
       track.lastSeenAt = now;
@@ -1241,6 +1244,16 @@ function drawHandMarkers(hands, t) {
       ctx.fillStyle = color;
       ctx.fill();
     }
+    ctx.restore();
+
+    // 디버그용: 현재 판정 상태를 숫자로 그대로 보여줌(테스트/튜닝 시 원인 파악용)
+    const label = `${hand.isPinching ? 'PINCH' : hand.isOpenPalm ? 'OPEN' : '-'} p:${hand.pinchRatio.toFixed(2)} e:${hand.extendedCount}`;
+    ctx.save();
+    ctx.font = "11px 'Orbitron', monospace";
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.scale(mirrorSign, 1); // 텍스트가 거울반전으로 뒤집혀 보이지 않도록 보정
+    ctx.fillText(label, mirrorSign * hand.smX, hand.smY - 26);
     ctx.restore();
   });
 }
