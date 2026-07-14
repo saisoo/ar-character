@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR 캐릭터 인식 · 그래픽디자인과</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+<style>
+  :root{
+    --bg: #05050a;
+    --panel: #0d0d16;
+    --panel-border: #1c1c2b;
+    --cyan: #00eaff;
+    --magenta: #ff2f92;
+    --lime: #b6ff3c;
+    --ink: #eef2f7;
+    --muted: #7d879c;
+  }
+
+  *{ box-sizing: border-box; }
+
+  html, body{
+    margin:0; padding:0; width:100%; height:100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Pretendard', system-ui, sans-serif;
+    overflow: hidden;
+  }
+
+  /* ---------- 배경 그리드 (AR 세계관 연출) ---------- */
+  .grid-bg{
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(0,234,255,0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,234,255,0.06) 1px, transparent 1px);
+    background-size: 42px 42px;
+    pointer-events: none;
+    z-index: 0;
+    mask-image: radial-gradient(circle at center, black 40%, transparent 85%);
+  }
+
+  /* ---------- 헤더 ---------- */
+  header{
+    position: fixed; top: 0; left: 0; right: 0;
+    z-index: 20;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 28px;
+    pointer-events: none;
+  }
+  .brand{
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.14em;
+    color: var(--cyan);
+    display: flex; align-items: center; gap: 10px;
+    text-shadow: 0 0 14px rgba(0,234,255,0.5);
+  }
+  .brand .dot{
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--lime);
+    box-shadow: 0 0 10px var(--lime);
+    animation: blink 1.6s ease-in-out infinite;
+  }
+  @keyframes blink{ 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+  .brand small{
+    font-family: 'Pretendard', sans-serif;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0;
+    font-size: 12px;
+  }
+
+  /* ---------- 무대 (카메라 + 캔버스) ---------- */
+  .stage-wrap{
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1;
+  }
+  .cam-frame{
+    position: relative;
+    max-width: 100vw; max-height: 100vh;
+    transform: scaleX(-1); /* 거울 모드 */
+  }
+  video, canvas{
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  video{ background: #000; }
+
+  /* ---------- 안내 문구 ---------- */
+  .guide{
+    position: absolute; left: 50%; bottom: 9%;
+    transform: translateX(-50%);
+    z-index: 15;
+    text-align: center;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
+  }
+  .guide .big{
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 700;
+    font-size: clamp(18px, 3vw, 34px);
+    letter-spacing: 0.04em;
+    color: var(--ink);
+    text-shadow: 0 0 20px rgba(0,234,255,0.35);
+  }
+  .guide .small{
+    margin-top: 8px;
+    font-size: clamp(12px, 1.3vw, 16px);
+    color: var(--muted);
+  }
+
+  /* ---------- 상태 뱃지 ---------- */
+  .status-badge{
+    position: fixed; top: 20px; right: 28px;
+    z-index: 20;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    background: rgba(13,13,22,0.7);
+    border: 1px solid var(--panel-border);
+    border-radius: 100px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    backdrop-filter: blur(6px);
+  }
+  .status-badge .led{
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted);
+  }
+  .status-badge.locked{ color: var(--lime); border-color: rgba(182,255,60,0.3); }
+  .status-badge.locked .led{ background: var(--lime); box-shadow: 0 0 8px var(--lime); }
+
+  /* ---------- 컨트롤 패널 (교사용) ---------- */
+  .panel-toggle{
+    position: fixed; bottom: 20px; right: 20px;
+    z-index: 30;
+    width: 46px; height: 46px;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--muted);
+    font-size: 18px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: 0.2s;
+  }
+  .panel-toggle:hover{ color: var(--cyan); border-color: var(--cyan); }
+
+  .panel{
+    position: fixed; bottom: 78px; right: 20px;
+    z-index: 30;
+    width: 280px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    padding: 18px;
+    transform: translateY(12px);
+    opacity: 0;
+    pointer-events: none;
+    transition: 0.22s ease;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  }
+  .panel.open{
+    transform: translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .panel h3{
+    margin: 0 0 4px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--cyan);
+  }
+  .panel p.hint{
+    margin: 0 0 14px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .upload-btn{
+    display: flex; align-items: center; justify-content: center;
+    width: 100%;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px dashed rgba(0,234,255,0.4);
+    background: rgba(0,234,255,0.06);
+    color: var(--cyan);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  .upload-btn:hover{ background: rgba(0,234,255,0.12); }
+  input[type=file]{ display:none; }
+
+  .char-preview{
+    margin-top: 12px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .char-preview img{
+    width: 40px; height: 40px; object-fit: contain;
+    background: #000;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+  }
+  .panel-row{ display:flex; gap:8px; margin-top: 10px; }
+  .mini-btn{
+    flex:1;
+    padding: 9px 0;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  .mini-btn:hover{ color: var(--ink); border-color: var(--muted); }
+
+  .error-box{
+    position: fixed; inset:0; z-index: 50;
+    display: none;
+    align-items: center; justify-content: center;
+    background: rgba(5,5,10,0.92);
+    text-align: center; padding: 40px;
+  }
+  .error-box.show{ display:flex; }
+  .error-box .msg{ max-width: 480px; }
+  .error-box h2{ font-family:'Orbitron',sans-serif; color: var(--magenta); }
+  .error-box p{ color: var(--muted); line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<div class="grid-bg"></div>
+
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    AR CHARACTER SCANNER <small>덕영고등학교 · 그래픽디자인과 XR</small>
+  </div>
+</header>
+
+<div class="status-badge" id="statusBadge">
+  <span class="led"></span>
+  <span id="statusText">카메라 준비 중</span>
+</div>
+
+<div class="stage-wrap">
+  <div class="cam-frame" id="camFrame">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+</div>
+
+<div class="guide" id="guide">
+  <div class="big">카메라 앞에 서 보세요</div>
+  <div class="small">얼굴이 인식되면 캐릭터가 옆에 나타나요</div>
+</div>
+
+<button class="panel-toggle" id="panelToggle" title="설정">⚙</button>
+<div class="panel" id="panel">
+  <h3>캐릭터 업로드</h3>
+  <p class="hint">배경을 투명하게 제거한 PNG 파일을 올려주세요. 업로드 즉시 화면에 바로 적용됩니다.</p>
+  <label class="upload-btn" for="fileInput">＋ 이미지 선택</label>
+  <input type="file" id="fileInput" accept="image/png, image/webp, image/gif">
+  <div class="char-preview" id="charPreview" style="display:none;">
+    <img id="charPreviewImg" src="" alt="">
+    <span id="charPreviewName"></span>
+  </div>
+  <div class="panel-row">
+    <button class="mini-btn" id="resetBtn">캐릭터 제거</button>
+    <button class="mini-btn" id="fullscreenBtn">전체화면</button>
+  </div>
+</div>
+
+<div class="error-box" id="errorBox">
+  <div class="msg">
+    <h2>카메라를 시작할 수 없어요</h2>
+    <p id="errorMsg">브라우저의 카메라 권한을 확인해주세요. 이 페이지가 https 주소(예: GitHub Pages)로 열려 있어야 카메라를 사용할 수 있습니다.</p>
+  </div>
+</div>
+
+<script>
+const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+const camFrame = document.getElementById('camFrame');
+const guide = document.getElementById('guide');
+const statusBadge = document.getElementById('statusBadge');
+const statusText = document.getElementById('statusText');
+const panel = document.getElementById('panel');
+const panelToggle = document.getElementById('panelToggle');
+const fileInput = document.getElementById('fileInput');
+const charPreview = document.getElementById('charPreview');
+const charPreviewImg = document.getElementById('charPreviewImg');
+const charPreviewName = document.getElementById('charPreviewName');
+const resetBtn = document.getElementById('resetBtn');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+const errorBox = document.getElementById('errorBox');
+const errorMsg = document.getElementById('errorMsg');
+
+let characterImg = null;
+let currentBox = null;      // 화면에 실제로 그려지는(보간된) 박스
+let lastSeenAt = 0;         // 마지막으로 얼굴을 본 시각
+let lockedFrames = 0;       // 연속으로 안정적으로 인식된 프레임 수
+let isLocked = false;
+const LOST_TIMEOUT = 1400;  // 이 시간(ms) 동안 못 찾으면 "인식 끊김" 처리
+
+// ---------------- 패널 토글 ----------------
+panelToggle.addEventListener('click', () => panel.classList.toggle('open'));
+
+fullscreenBtn.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(()=>{});
+  } else {
+    document.exitFullscreen();
+  }
+});
+
+resetBtn.addEventListener('click', () => {
+  characterImg = null;
+  charPreview.style.display = 'none';
+  fileInput.value = '';
+});
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    characterImg = img;
+    charPreviewImg.src = url;
+    charPreviewName.textContent = file.name.length > 14 ? file.name.slice(0,12)+'…' : file.name;
+    charPreview.style.display = 'flex';
+  };
+  img.src = url;
+});
+
+// ---------------- 카메라 시작 ----------------
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await new Promise(resolve => { video.onloadedmetadata = resolve; });
+  await video.play();
+
+  const vw = video.videoWidth, vh = video.videoHeight;
+  // 비디오 요소가 실제 영상 비율을 그대로 갖도록 하여, 캔버스 좌표 계산을 단순화
+  camFrame.style.aspectRatio = `${vw} / ${vh}`;
+  const winRatio = window.innerWidth / window.innerHeight;
+  const vidRatio = vw / vh;
+  if (vidRatio > winRatio) {
+    camFrame.style.width = '100vw';
+    camFrame.style.height = 'auto';
+  } else {
+    camFrame.style.height = '100vh';
+    camFrame.style.width = 'auto';
+  }
+
+  resizeOverlay();
+}
+
+function resizeOverlay() {
+  const rect = camFrame.getBoundingClientRect();
+  overlay.width = rect.width;
+  overlay.height = rect.height;
+}
+window.addEventListener('resize', resizeOverlay);
+
+// ---------------- 얼굴 인식 루프 ----------------
+async function runDetectionLoop() {
+  const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+
+  async function detectTick() {
+    if (video.readyState === 4) {
+      const displaySize = { width: overlay.width, height: overlay.height };
+      try {
+        const detection = await faceapi.detectSingleFace(video, options);
+        if (detection) {
+          const resized = faceapi.resizeResults(detection, displaySize);
+          const box = resized.box;
+          lastSeenAt = performance.now();
+          lockedFrames = Math.min(lockedFrames + 1, 30);
+
+          const target = { x: box.x, y: box.y, width: box.width, height: box.height };
+          if (!currentBox) {
+            currentBox = target;
+          } else {
+            const smoothing = 0.35;
+            currentBox.x += (target.x - currentBox.x) * smoothing;
+            currentBox.y += (target.y - currentBox.y) * smoothing;
+            currentBox.width += (target.width - currentBox.width) * smoothing;
+            currentBox.height += (target.height - currentBox.height) * smoothing;
+          }
+        } else {
+          lockedFrames = Math.max(lockedFrames - 3, 0);
+        }
+      } catch (err) {
+        // 모델 로딩 중이거나 프레임 스킵 - 무시하고 계속 진행
+      }
+    }
+    setTimeout(detectTick, 120); // 초당 약 8회 인식으로 성능 확보
+  }
+  detectTick();
+}
+
+// ---------------- 렌더 루프 (매 프레임 부드럽게 그림) ----------------
+function renderLoop(t) {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  const now = performance.now();
+  const faceVisible = currentBox && (now - lastSeenAt < LOST_TIMEOUT);
+
+  if (faceVisible) {
+    isLocked = lockedFrames > 6;
+    drawBrackets(currentBox, isLocked, t);
+    if (characterImg) drawCharacter(currentBox, t);
+    guide.style.opacity = '0';
+    setStatus(isLocked ? '인식 완료' : '인식 중', isLocked);
+  } else {
+    isLocked = false;
+    lockedFrames = 0;
+    guide.style.opacity = '1';
+    setStatus('카메라 대기 중', false);
+  }
+
+  requestAnimationFrame(renderLoop);
+}
+
+function setStatus(text, locked) {
+  if (statusText.textContent !== text) statusText.textContent = text;
+  statusBadge.classList.toggle('locked', locked);
+}
+
+// AR 스캔 브라켓: 모서리 4개 + 락온 시 라벨
+function drawBrackets(box, locked, t) {
+  const { x, y, width: w, height: h } = box;
+  const pad = w * 0.18;
+  const bx = x - pad, by = y - pad, bw = w + pad * 2, bh = h + pad * 2;
+  const armLen = Math.min(bw, bh) * 0.22;
+  const color = locked ? getCssVar('--lime') : getCssVar('--cyan');
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = locked ? 14 : 8;
+
+  const corners = [
+    [bx, by, 1, 1],
+    [bx + bw, by, -1, 1],
+    [bx, by + bh, 1, -1],
+    [bx + bw, by + bh, -1, -1],
+  ];
+  corners.forEach(([cx, cy, dx, dy]) => {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + armLen * dy);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx + armLen * dx, cy);
+    ctx.stroke();
+  });
+
+  // 스캔 라인 (락온 전에만 위아래로 스캔하는 느낌)
+  if (!locked) {
+    const scanY = by + ((t / 900) % 1) * bh;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(bx, scanY);
+    ctx.lineTo(bx + bw, scanY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+
+  // 라벨
+  ctx.save();
+  ctx.font = "600 13px 'Orbitron', sans-serif";
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+  ctx.scale(-1, 1); // 부모가 거울반전이라 텍스트가 뒤집히므로 다시 뒤집어 정방향으로
+  const label = locked ? 'LOCKED · 캐릭터 등장' : 'SCANNING...';
+  const labelX = -(bx + bw / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText(label, labelX, by - 12);
+  ctx.restore();
+}
+
+// 캐릭터를 얼굴 옆(거울모드 화면 기준 오른쪽)에 홀로그램처럼 배치
+function drawCharacter(box, t) {
+  const bob = Math.sin(t / 450) * (box.height * 0.04);
+  const targetH = box.height * 2.1;
+  const ratio = characterImg.naturalWidth / characterImg.naturalHeight;
+  const targetW = targetH * ratio;
+
+  // 화면 전체가 CSS로 거울반전되어 있으므로, 원본(raw) 좌표에서는
+  // 얼굴의 "왼쪽"에 배치해야 실제 화면(거울모드)에서는 "오른쪽"에 보인다.
+  const cx = box.x - box.width * 0.35 - targetW / 2;
+  const cy = box.y + box.height * 0.55 + bob;
+
+  ctx.save();
+  ctx.shadowColor = getCssVar('--cyan');
+  ctx.shadowBlur = 26;
+  ctx.globalAlpha = 0.98;
+
+  // 그림 자체가 좌우반전되어 보이지 않도록 내부적으로 한 번 더 반전해 상쇄
+  ctx.translate(cx, cy);
+  ctx.scale(-1, 1);
+  ctx.drawImage(characterImg, -targetW / 2, -targetH / 2, targetW, targetH);
+  ctx.restore();
+}
+
+function getCssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ---------------- 초기화 ----------------
+async function init() {
+  try {
+    statusText.textContent = '모델 불러오는 중';
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+
+    statusText.textContent = '카메라 연결 중';
+    await startCamera();
+
+    statusText.textContent = '카메라 대기 중';
+    runDetectionLoop();
+    requestAnimationFrame(renderLoop);
+  } catch (err) {
+    console.error(err);
+    errorMsg.textContent = (err && err.message) ? err.message : String(err);
+    errorBox.classList.add('show');
+  }
+}
+
+init();
+</script>
+</body>
+</html>
