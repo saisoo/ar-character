@@ -415,7 +415,7 @@ let grabByHand = [null, null];      // 각 손이 잡고 있거나 태우고 있
 let hitEffects = [];                // [{ x, y, t }] 때리기 이펙트 표시용(여러 개 동시 가능)
 let happyEffects = [];              // [{x,y,vx,vy,t,glyph}] 기쁨(하트)/졸림(Zzz) 이펙트 공용 배열
 
-const GRAB_SPEED_FACTOR = 0.055;   // 이보다 손이 느리게 머물러야 "느린 움직임"으로 판정(스매시와 구분)
+const SMASH_SPEED_FACTOR = 0.16;   // 스매시로 인정할 손 속도 - 톡톡/긁기보다 훨씬 빠른 "휙" 스치는 동작만 걸리도록 높게 설정
 const SIZE_FACTOR = 0.26;          // 캐릭터 키 = 화면 높이의 26% (여러 개일 때 겹치지 않게 약간 축소)
 const GRAVITY_FACTOR = 0.0011;     // 중력 = 화면 높이 비율(프레임당)
 const FLOOR_RESTITUTION = 0.55;    // 바닥/벽에 부딪혔을 때 반발 계수(더 통통 튀도록 상향)
@@ -942,8 +942,43 @@ function updateCharacterPhysics(c, t, dt, hands) {
       continue;
     }
 
-    // (b) 손바닥으로 세게 스침 → 빙글빙글 날아가 여기저기 부딪힘
-    if (hand.isOpenPalm && overlapping && handSpeed >= targetW * GRAB_SPEED_FACTOR && t > c.nextHitAllowedAt) {
+    // 머리/몸 근처의 섬세한 동작(톡톡/긁기)부터 먼저 판정 - 스매시 속도 기준에 걸려서
+    // 반응이 시작되기도 전에 캐릭터가 날아가버리는 것을 방지하기 위해 순서를 바꿈
+    const headCenterY = c.charY - targetH * 0.32;
+    const headDx = hand.indexX - c.charX, headDy = hand.indexY - headCenterY;
+    const inHeadZone = Math.hypot(headDx, headDy) < targetW * 0.32 && !hand.isPinching;
+
+    // (b) 검지 손끝으로 머리를 톡톡 → 칭찬받아 좋아함
+    if (inHeadZone && c.onGround) {
+      c.headPatHistory.push({ t, y: hand.indexY });
+      while (c.headPatHistory.length && t - c.headPatHistory[0].t > 700) c.headPatHistory.shift();
+      if (t > c.patCooldownUntil && detectHandBounce(c.headPatHistory) && c.headPatHistory.length >= 4) {
+        c.happyUntil = t + 1100;
+        c.patCooldownUntil = t + 1400;
+        c.headPatHistory = [];
+        spawnHappyEffect(c, targetW, targetH);
+      }
+    }
+
+    // (c) 손가락으로 긁는 듯한 좌우 움직임 → 꾸벅꾸벅 졸림
+    const scratchZone = dist < collideRadius * 0.8 && !hand.isPinching && !hand.isOpenPalm;
+    if (scratchZone) {
+      c.scratchHistory.push({ t, x: hand.indexX });
+      while (c.scratchHistory.length && t - c.scratchHistory[0].t > 900) c.scratchHistory.shift();
+      if (t > c.scratchCooldownUntil && detectScratchPattern(c.scratchHistory)) {
+        c.sleepyUntil = t + 2600;
+        c.scratchCooldownUntil = t + 3000;
+        c.scratchHistory = [];
+        spawnSleepyEffect(c, targetW, targetH);
+      }
+    } else {
+      c.scratchHistory = [];
+    }
+
+    // (d) 손바닥으로 세게 스침 → 빙글빙글 날아가 여기저기 부딪힘
+    // 머리/몸에 딱 붙어 섬세하게 움직이는 중(톡톡/긁기 구역)이면 스매시로 치지 않음 + 훨씬 빠른 속도만 인정
+    if (hand.isOpenPalm && overlapping && !inHeadZone && !scratchZone
+        && handSpeed >= targetW * SMASH_SPEED_FACTOR && t > c.nextHitAllowedAt) {
       const nx = -dx / dist, ny = -dy / dist; // 캐릭터가 밀려날 방향(손 반대쪽)
       const handVX = hand.vx * HAND_VEL_TO_PXFRAME;
       const handVY = hand.vy * HAND_VEL_TO_PXFRAME;
@@ -970,36 +1005,6 @@ function updateCharacterPhysics(c, t, dt, hands) {
       hitEffects.push({ x: hand.smX, y: hand.smY, t });
       bounced = true;
       continue;
-    }
-
-    // (c) 검지 손끝으로 머리를 톡톡 → 칭찬받아 좋아함
-    const headCenterY = c.charY - targetH * 0.32;
-    const headDx = hand.indexX - c.charX, headDy = hand.indexY - headCenterY;
-    const inHeadZone = Math.hypot(headDx, headDy) < targetW * 0.32 && !hand.isPinching;
-    if (inHeadZone && c.onGround) {
-      c.headPatHistory.push({ t, y: hand.indexY });
-      while (c.headPatHistory.length && t - c.headPatHistory[0].t > 700) c.headPatHistory.shift();
-      if (t > c.patCooldownUntil && detectHandBounce(c.headPatHistory) && c.headPatHistory.length >= 4) {
-        c.happyUntil = t + 1100;
-        c.patCooldownUntil = t + 1400;
-        c.headPatHistory = [];
-        spawnHappyEffect(c, targetW, targetH);
-      }
-    }
-
-    // (d) 손가락으로 긁는 듯한 좌우 움직임 → 꾸벅꾸벅 졸림
-    const scratchZone = dist < collideRadius * 0.8 && !hand.isPinching && !hand.isOpenPalm;
-    if (scratchZone) {
-      c.scratchHistory.push({ t, x: hand.indexX });
-      while (c.scratchHistory.length && t - c.scratchHistory[0].t > 900) c.scratchHistory.shift();
-      if (t > c.scratchCooldownUntil && detectScratchPattern(c.scratchHistory)) {
-        c.sleepyUntil = t + 2600;
-        c.scratchCooldownUntil = t + 3000;
-        c.scratchHistory = [];
-        spawnSleepyEffect(c, targetW, targetH);
-      }
-    } else {
-      c.scratchHistory = [];
     }
 
     // (e) 손바닥을 아래에 두고 들어올리는 동작 → 손바닥 위에 올라타서 탄성 점프
