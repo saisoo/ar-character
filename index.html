@@ -328,7 +328,7 @@
 
 <div class="guide" id="guide">
   <div class="big">카메라 앞에 서 보세요</div>
-  <div class="small">캐릭터를 손으로 잡아 던지거나, 때리거나, 아래서 방방 튕겨보세요</div>
+  <div class="small">캐릭터를 손으로 잡아 던지거나, 때리거나, 아래서 방방 튕기거나, 머리를 톡톡 쓰다듬어보세요</div>
 </div>
 
 <button class="panel-toggle" id="panelToggle" title="설정">⚙</button>
@@ -405,6 +405,7 @@ let grabByHand = [null, null];      // 각 손이 잡고 있는 캐릭터 id
 let jumpCooldownUntil = [0, 0];     // 손마다 따로 점프 쿨다운
 let handYHistories = [[], []];      // 손마다 따로 상하 움직임 기록
 let hitEffects = [];                // [{ x, y, t }] 때리기 이펙트 표시용(여러 개 동시 가능)
+let happyEffects = [];              // [{x,y,vx,vy,t,glyph}] 머리 쓰다듬을 때 뿜어져 나오는 하트/반짝임
 
 const GRAB_SPEED_FACTOR = 0.055;   // 이보다 손이 느리게 머물러야 "캐치" 판정 시작
 const GRAB_DWELL_FRAMES = 14;      // 캐치까지 필요한 시간(프레임 환산, 약 0.23초)
@@ -497,11 +498,20 @@ function addCharacterFromFile(file) {
       walkTargetX: null, walkChangeAt: 0,
       grabDwell: 0,
       nextHitAllowedAt: 0,
+      headPatHistory: [],
+      happyUntil: 0,
+      patCooldownUntil: 0,
+      rig: null, // 인간형으로 인식되면 팔다리 리깅 데이터가 채워짐(실패 시 null 유지 = 통짜 이미지)
     };
     characters.push(c);
     spawnCharacter(c);
     renderCharListItem(c, url);
     updateCharCountHint();
+
+    // 리깅 분석은 다소 무거워서, 업로드 직후 화면이 멈칫하지 않도록 한 틱 뒤로 미룸
+    setTimeout(() => {
+      c.rig = buildCharacterRig(img);
+    }, 30);
   };
   img.src = url;
 }
@@ -729,6 +739,7 @@ function renderLoop(t) {
   for (const c of characters) drawCharacter(c, t);
   drawHandMarkers(hands, t);
   drawHitEffects(t);
+  drawHappyEffects(t);
 
   requestAnimationFrame(renderLoop);
 }
@@ -798,6 +809,255 @@ function getCharSize(c) {
   const targetH = overlay.height * SIZE_FACTOR;
   const ratio = c.img.naturalWidth / c.img.naturalHeight;
   return { targetW: targetH * ratio, targetH };
+}
+
+// ================= 인간형 캐릭터 자동 리깅 =================
+// 업로드된 그림의 투명 배경(실루엣)을 분석해서, 팔다리처럼 몸통에서 삐죽 튀어나온 부분을
+// 자동으로 찾아 몸통과 분리한 뒤, 각 부위를 관절점 기준으로 살짝 회전시켜
+// 걷거나 뛸 때 팔다리가 움직이는 것처럼 보이게 만듭니다.
+// 실패하면(팔다리가 뚜렷하게 분리되지 않는 그림 등) null을 반환하고,
+// 이 경우 기존처럼 이미지 전체를 하나로 다루는 방식으로 자동 대체됩니다.
+
+const RIG_WORK_SIZE = 220; // 리깅 분석용 작업 해상도(성능을 위해 축소)
+
+function buildCharacterRig(img) {
+  try {
+    const scale = Math.min(1, RIG_WORK_SIZE / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(8, Math.round(img.naturalWidth * scale));
+    const h = Math.max(8, Math.round(img.naturalHeight * scale));
+
+    const work = document.createElement('canvas');
+    work.width = w; work.height = h;
+    const wctx = work.getContext('2d', { willReadFrequently: true });
+    wctx.drawImage(img, 0, 0, w, h);
+    const srcData = wctx.getImageData(0, 0, w, h);
+
+    const alpha = new Uint8Array(w * h);
+    let fgCount = 0;
+    for (let i = 0; i < w * h; i++) {
+      alpha[i] = srcData.data[i * 4 + 3] > 24 ? 1 : 0;
+      fgCount += alpha[i];
+    }
+    if (fgCount < 200) return null; // 그림이 거의 비어있으면 리깅 불가
+
+    const dist = rigDistanceTransform(alpha, w, h);
+    const skeleton = rigZhangSuenThinning(alpha, w, h);
+    const graph = rigBuildSkeletonGraph(skeleton, w, h);
+    if (!graph || graph.nodes.length < 3) return null;
+
+    const limbs = rigExtractLimbPaths(graph);
+    const classified = rigClassifyLimbs(limbs, h);
+    if (classified.length < 2) return null; // 팔다리를 충분히 찾지 못하면 실패 처리
+
+    return rigBuildPartCanvases(srcData, alpha, dist, w, h, classified);
+  } catch (err) {
+    console.error('자동 리깅 실패 - 통짜 이미지로 표시합니다.', err);
+    return null;
+  }
+}
+
+// 각 전경 픽셀이 배경에서 얼마나 떨어져 있는지(다중 소스 BFS) - 팔다리 두께 추정에 사용
+function rigDistanceTransform(alpha, w, h) {
+  const dist = new Float32Array(w * h).fill(Infinity);
+  const queue = [];
+  for (let i = 0; i < w * h; i++) if (!alpha[i]) { dist[i] = 0; queue.push(i); }
+  let qi = 0;
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  while (qi < queue.length) {
+    const idx = queue[qi++];
+    const cx = idx % w, cy = (idx / w) | 0;
+    for (const [ddx, ddy] of dirs) {
+      const nx = cx + ddx, ny = cy + ddy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const ni = ny * w + nx;
+      const nd = dist[idx] + (ddx !== 0 && ddy !== 0 ? Math.SQRT2 : 1);
+      if (nd < dist[ni]) { dist[ni] = nd; queue.push(ni); }
+    }
+  }
+  return dist;
+}
+
+// Zhang-Suen 세선화: 실루엣을 1px 두께의 뼈대(스켈레톤)로 깎아냄
+function rigZhangSuenThinning(alphaIn, w, h) {
+  let img = Uint8Array.from(alphaIn);
+  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : img[y * w + x];
+  let changed = true, iterations = 0;
+  while (changed && iterations < 60) { // 무한 반복 방지 안전장치
+    changed = false;
+    iterations++;
+    for (const step of [0, 1]) {
+      const toRemove = [];
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          if (!at(x, y)) continue;
+          const p2=at(x,y-1), p3=at(x+1,y-1), p4=at(x+1,y), p5=at(x+1,y+1),
+                p6=at(x,y+1), p7=at(x-1,y+1), p8=at(x-1,y), p9=at(x-1,y-1);
+          const neighbors = [p2,p3,p4,p5,p6,p7,p8,p9];
+          const B = neighbors.reduce((a, b) => a + b, 0);
+          if (B < 2 || B > 6) continue;
+          let A = 0;
+          for (let k = 0; k < 8; k++) if (neighbors[k] === 0 && neighbors[(k + 1) % 8] === 1) A++;
+          if (A !== 1) continue;
+          if (step === 0) {
+            if (p2 * p4 * p6 !== 0) continue;
+            if (p4 * p6 * p8 !== 0) continue;
+          } else {
+            if (p2 * p4 * p8 !== 0) continue;
+            if (p2 * p6 * p8 !== 0) continue;
+          }
+          toRemove.push(y * w + x);
+        }
+      }
+      if (toRemove.length) { changed = true; for (const idx of toRemove) img[idx] = 0; }
+    }
+  }
+  return img;
+}
+
+// 스켈레톤 픽셀들을 그래프(끝점/분기점과 그 사이 경로)로 변환
+function rigBuildSkeletonGraph(skeleton, w, h) {
+  const idxOf = (x, y) => y * w + x;
+  const isSkel = (x, y) => x >= 0 && y >= 0 && x < w && y < h && skeleton[idxOf(x, y)] === 1;
+  const neighborsOf = (x, y) => {
+    const n = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      if (isSkel(x + dx, y + dy)) n.push([x + dx, y + dy]);
+    }
+    return n;
+  };
+
+  const featurePoints = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!isSkel(x, y)) continue;
+    const deg = neighborsOf(x, y).length;
+    if (deg === 1) featurePoints.push({ x, y, type: 'end' });
+    else if (deg >= 3) featurePoints.push({ x, y, type: 'branch' });
+  }
+  if (featurePoints.length === 0) return null;
+
+  const featureSet = new Map(featurePoints.map(p => [idxOf(p.x, p.y), p]));
+  const visitedEdgeStarts = new Set();
+  const edges = [];
+
+  for (const fp of featurePoints) {
+    for (const [nx, ny] of neighborsOf(fp.x, fp.y)) {
+      const edgeKey = `${idxOf(fp.x, fp.y)}->${idxOf(nx, ny)}`;
+      if (visitedEdgeStarts.has(edgeKey)) continue;
+
+      const path = [{ x: fp.x, y: fp.y }];
+      let prev = { x: fp.x, y: fp.y };
+      let cur = { x: nx, y: ny };
+      let safety = 0;
+      while (safety++ < w * h) {
+        path.push(cur);
+        if (featureSet.has(idxOf(cur.x, cur.y)) && !(cur.x === fp.x && cur.y === fp.y)) break;
+        const options = neighborsOf(cur.x, cur.y).filter(([px, py]) => !(px === prev.x && py === prev.y));
+        if (options.length === 0) break;
+        prev = cur;
+        cur = { x: options[0][0], y: options[0][1] };
+      }
+      const endFp = featureSet.get(idxOf(cur.x, cur.y));
+      if (endFp && endFp !== fp) {
+        edges.push({ a: fp, b: endFp, path });
+        visitedEdgeStarts.add(edgeKey);
+        if (path.length >= 2) {
+          const beforeLast = path[path.length - 2];
+          visitedEdgeStarts.add(`${idxOf(endFp.x, endFp.y)}->${idxOf(beforeLast.x, beforeLast.y)}`);
+        }
+      }
+    }
+  }
+  return { nodes: featurePoints, edges };
+}
+
+// 끝점-분기점을 잇는 경로를 "팔다리 후보"로 추출 (분기점=관절, 끝점=팔다리 끝)
+function rigExtractLimbPaths(graph) {
+  const limbs = [];
+  for (const e of graph.edges) {
+    const aIsEnd = e.a.type === 'end';
+    const bIsEnd = e.b.type === 'end';
+    if (aIsEnd !== bIsEnd) {
+      const pivot = aIsEnd ? e.b : e.a;
+      const tip = aIsEnd ? e.a : e.b;
+      const path = aIsEnd ? e.path.slice().reverse() : e.path;
+      limbs.push({ pivot, tip, path });
+    }
+  }
+  return limbs;
+}
+
+// 팔다리 후보를 위치 기준으로 팔/다리, 좌/우로 분류 (맨 위쪽 끝은 머리로 보고 제외)
+function rigClassifyLimbs(limbs, h) {
+  const sorted = limbs.slice().sort((a, b) => a.tip.y - b.tip.y);
+  const withoutHead = sorted.length > 2 ? sorted.slice(1) : sorted;
+
+  const upper = withoutHead.filter(l => l.pivot.y < h * 0.5).sort((a, b) => a.tip.x - b.tip.x);
+  const lower = withoutHead.filter(l => l.pivot.y >= h * 0.5).sort((a, b) => a.tip.x - b.tip.x);
+
+  const result = [];
+  upper.slice(0, 2).forEach((l, i) => result.push({ ...l, role: 'arm', side: i === 0 ? 'L' : 'R' }));
+  lower.slice(0, 2).forEach((l, i) => result.push({ ...l, role: 'leg', side: i === 0 ? 'L' : 'R' }));
+  return result;
+}
+
+// 각 팔다리 영역의 픽셀을 몸통에서 잘라내 별도 캔버스로 만듦(관절 기준 회전을 위해)
+function rigBuildPartCanvases(srcData, alpha, dist, w, h, limbs) {
+  const total = w * h;
+  const ownerId = new Int16Array(total).fill(-1); // -1 = 몸통(머리+동체)
+  const ownerDist = new Float32Array(total).fill(Infinity);
+
+  limbs.forEach((limb, li) => {
+    for (const p of limb.path) {
+      const idx = p.y * w + p.x;
+      const r = Math.max(2, dist[idx] * 1.45); // 로컬 두께 기반 반경(약간 여유를 둠)
+      const ri = Math.ceil(r);
+      for (let dy = -ri; dy <= ri; dy++) {
+        const yy = p.y + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -ri; dx <= ri; dx++) {
+          const xx = p.x + dx; if (xx < 0 || xx >= w) continue;
+          const ii = yy * w + xx;
+          if (!alpha[ii]) continue;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r * r) continue;
+          if (d2 < ownerDist[ii]) { ownerDist[ii] = d2; ownerId[ii] = li; }
+        }
+      }
+    }
+  });
+
+  const partCanvases = limbs.map(() => document.createElement('canvas'));
+  const bodyCanvas = document.createElement('canvas');
+  [...partCanvases, bodyCanvas].forEach(cv => { cv.width = w; cv.height = h; });
+  const partCtxs = partCanvases.map(cv => cv.getContext('2d'));
+  const bodyCtx = bodyCanvas.getContext('2d');
+  const partImgData = partCtxs.map(cx => cx.createImageData(w, h));
+  const bodyImgData = bodyCtx.createImageData(w, h);
+
+  for (let i = 0; i < total; i++) {
+    if (!alpha[i]) continue;
+    const off = i * 4;
+    const owner = ownerId[i];
+    const target = owner === -1 ? bodyImgData : partImgData[owner];
+    target.data[off] = srcData.data[off];
+    target.data[off + 1] = srcData.data[off + 1];
+    target.data[off + 2] = srcData.data[off + 2];
+    target.data[off + 3] = srcData.data[off + 3];
+  }
+  partCtxs.forEach((cx, i) => cx.putImageData(partImgData[i], 0, 0));
+  bodyCtx.putImageData(bodyImgData, 0, 0);
+
+  return {
+    w, h,
+    body: bodyCanvas,
+    parts: limbs.map((limb, i) => ({
+      canvas: partCanvases[i],
+      pivotX: limb.pivot.x,
+      pivotY: limb.pivot.y,
+      role: limb.role,
+      side: limb.side,
+    })),
+  };
 }
 
 // 캐릭터가 처음 등장할 위치 - 얼굴이 인식되어 있으면 그 근처(겹치지 않게 살짝 랜덤 오프셋), 아니면 화면 중앙 부근
@@ -888,9 +1148,10 @@ function updateCharacterPhysics(c, t, dt, hands, bounceDetectedByHand) {
       const punch = handSpeed * HAND_VEL_TO_PXFRAME * HIT_POWER;
       c.velX = handVX + rvx * BOUNCE_RESTITUTION + nx * punch;
       c.velY = handVY + rvy * BOUNCE_RESTITUTION + ny * punch - overlay.height * 0.004;
-      // 접선 방향 성분을 스핀으로 변환 → 날아가면서 데굴데굴 회전
+      // 접선 방향 성분을 스핀으로 변환 → 날아가면서 데굴데굴 회전(과도한 회전 방지를 위해 범위 제한)
       const tangentRel = relVX * (-ny) + relVY * nx;
-      c.angVel += tangentRel * 0.05;
+      c.angVel += Math.max(-0.35, Math.min(0.35, tangentRel * 0.012));
+      c.angVel = Math.max(-0.5, Math.min(0.5, c.angVel));
       // 충격 반동(스쿼시) - 세게 맞을수록 더 납작하게 눌렸다 튀어나옴
       c.landingSquash = Math.min(1, punch / (overlay.height * 0.05));
       // 겹침 방지: 충돌 반경 밖으로 즉시 밀어내기
@@ -905,7 +1166,21 @@ function updateCharacterPhysics(c, t, dt, hands, bounceDetectedByHand) {
       continue;
     }
 
-    if (overlapping && handSpeed < targetW * GRAB_SPEED_FACTOR && grabByHand[hi] === null) {
+    // 머리 근처를 톡톡 쓰다듬는지 감지 (잡기보다 우선 - 머리 영역에 있으면 잡기 판정은 건너뜀)
+    const headCenterY = c.charY - targetH * 0.32;
+    const dxHead = hand.smX - c.charX, dyHead = hand.smY - headCenterY;
+    const inHeadZone = Math.hypot(dxHead, dyHead) < targetW * 0.34 && handSpeed < targetW * GRAB_SPEED_FACTOR * 2.2;
+
+    if (inHeadZone && c.onGround) {
+      c.headPatHistory.push({ t, y: hand.smY });
+      while (c.headPatHistory.length && t - c.headPatHistory[0].t > 700) c.headPatHistory.shift();
+      if (t > c.patCooldownUntil && detectHandBounce(c.headPatHistory) && c.headPatHistory.length >= 4) {
+        c.happyUntil = t + 1100;
+        c.patCooldownUntil = t + 1400;
+        c.headPatHistory = [];
+        spawnHappyEffect(c, targetW, targetH);
+      }
+    } else if (overlapping && handSpeed < targetW * GRAB_SPEED_FACTOR && grabByHand[hi] === null) {
       anySlowOverlap = true;
       grabCandidateHand = hi;
     }
@@ -944,32 +1219,45 @@ function updateCharacterPhysics(c, t, dt, hands, bounceDetectedByHand) {
 
 // 실제 위치 적분(중력/벽/바닥) + idle 어슬렁 로직 - grabbed가 아닐 때만 호출
 function velIntegrate(c, dt, gravity, floorY, targetW, targetH, t) {
-  c.velY += gravity * dt;
-  c.charX += c.velX * dt;
-  c.charY += c.velY * dt;
-
-  // 좌우 벽 충돌
-  if (c.charX < targetW / 2) { c.charX = targetW / 2; c.velX = Math.abs(c.velX) * FLOOR_RESTITUTION; c.landingSquash = Math.max(c.landingSquash, Math.min(1, Math.abs(c.velX) / (overlay.height * 0.04))); }
-  if (c.charX > overlay.width - targetW / 2) { c.charX = overlay.width - targetW / 2; c.velX = -Math.abs(c.velX) * FLOOR_RESTITUTION; c.landingSquash = Math.max(c.landingSquash, Math.min(1, Math.abs(c.velX) / (overlay.height * 0.04))); }
-  // 천장 충돌(너무 세게 던졌을 때 화면 밖으로 사라지지 않도록)
-  if (c.charY < targetH / 2) { c.charY = targetH / 2; c.velY = Math.abs(c.velY) * FLOOR_RESTITUTION; }
-
-  // 바닥 충돌
-  if (c.charY >= floorY) {
-    const impactV = Math.abs(c.velY);
+  if (c.onGround) {
+    // 이미 바닥에 붙어있는 상태: 좌우 이동/마찰만 적용하고 수직은 바닥에 고정
+    // (매 프레임 바닥 충돌을 새로 판정하지 않으므로 미세한 중력/반발 진동으로 인한 깜빡임이 생기지 않음)
+    c.charX += c.velX * dt;
+    c.velX *= GROUND_FRICTION;
     c.charY = floorY;
-    if (impactV > 1.2) {
-      c.velY = -c.velY * FLOOR_RESTITUTION;
-      c.landingSquash = Math.max(c.landingSquash, Math.min(1, impactV / (overlay.height * 0.045)));
+    if (c.velY < -1.5) {
+      c.onGround = false; // 점프/충돌 등으로 확실한 위쪽 속도가 생겼을 때만 공중으로 전환
     } else {
       c.velY = 0;
     }
-    c.velX *= GROUND_FRICTION;
-    c.onGround = true;
   } else {
-    c.onGround = false;
+    c.velY += gravity * dt;
+    c.charX += c.velX * dt;
+    c.charY += c.velY * dt;
     c.velX *= AIR_DRAG;
+
+    // 천장 충돌(너무 세게 던졌을 때 화면 밖으로 사라지지 않도록)
+    if (c.charY < targetH / 2) { c.charY = targetH / 2; c.velY = Math.abs(c.velY) * FLOOR_RESTITUTION; }
+
+    // 바닥 충돌
+    if (c.charY >= floorY) {
+      const impactV = Math.abs(c.velY);
+      c.charY = floorY;
+      if (impactV > 1.2) {
+        c.velY = -c.velY * FLOOR_RESTITUTION;
+        c.landingSquash = Math.max(c.landingSquash, Math.min(1, impactV / (overlay.height * 0.045)));
+        // 반발 속도가 아주 작아지면(사실상 멈춘 수준) 바로 접지 상태로 확정해 미세 바운스 방지
+        if (Math.abs(c.velY) < 2.5) { c.velY = 0; c.onGround = true; }
+      } else {
+        c.velY = 0;
+        c.onGround = true;
+      }
+    }
   }
+
+  // 좌우 벽 충돌은 접지 여부와 무관하게 항상 체크
+  if (c.charX < targetW / 2) { c.charX = targetW / 2; c.velX = Math.abs(c.velX) * FLOOR_RESTITUTION; c.landingSquash = Math.max(c.landingSquash, Math.min(1, Math.abs(c.velX) / (overlay.height * 0.04))); }
+  if (c.charX > overlay.width - targetW / 2) { c.charX = overlay.width - targetW / 2; c.velX = -Math.abs(c.velX) * FLOOR_RESTITUTION; c.landingSquash = Math.max(c.landingSquash, Math.min(1, Math.abs(c.velX) / (overlay.height * 0.04))); }
 
   // 바닥에서 속도가 거의 없으면 스스로 좌우로 어슬렁거림
   if (c.onGround) {
@@ -1026,23 +1314,43 @@ function resolveCharacterCollisions() {
       const squash = Math.min(1, impactSpeed / (overlay.height * 0.035));
       a.landingSquash = Math.max(a.landingSquash, squash);
       b.landingSquash = Math.max(b.landingSquash, squash);
-      a.angVel += (dx * a.velY - dy * a.velX) * 0.0006;
-      b.angVel += (dx * b.velY - dy * b.velX) * 0.0006;
 
-      a.onGround = false; b.onGround = false;
+      // 접선 방향 상대속도로 스핀 부여(단위가 맞지 않던 이전 공식이 과도한 회전/깜빡임의 원인이었음)
+      const tx = -ny, ty = nx;
+      const relTangent = (a.velX - b.velX) * tx + (a.velY - b.velY) * ty;
+      const spinKick = Math.max(-0.3, Math.min(0.3, relTangent * 0.01));
+      a.angVel += spinKick;
+      b.angVel -= spinKick;
+      a.angVel = Math.max(-0.5, Math.min(0.5, a.angVel));
+      b.angVel = Math.max(-0.5, Math.min(0.5, b.angVel));
+
+      // onGround는 여기서 강제로 끄지 않음: 정지해 맞닿아 있는 캐릭터끼리 매 프레임
+      // 접지 상태가 켜졌다 꺼졌다 반복되며 깜빡이던 문제의 원인이었음.
+      // 실제로 튕겨날 만큼 속도가 커지면 velIntegrate가 다음 프레임에 자연스럽게 공중 상태로 전환함.
     }
   }
 }
 
 // 캐릭터를 화면의 실제 물리 위치(charX, charY)에 그림
 // - 공중에서는 낙하 속도에 따라 늘어나고 데굴데굴 회전, 충격을 받으면 순간적으로 눌렸다 튀어나오고, 걸을 땐 뒤뚱거림
+// - 인간형으로 인식되어 리깅(c.rig)이 만들어졌다면 팔다리가 걷는 자세에 맞춰 따로 움직임
 function drawCharacter(c, t) {
   const { targetW, targetH } = getCharSize(c);
   const airborne = !c.onGround && c.charState !== 'grabbed';
+  const isHappy = t < c.happyUntil;
+  const walking = c.onGround && c.charState === 'idle' && Math.abs(c.velX) > 0.3;
 
   let squashY = 1, squashX = 1, tilt = 0;
+  let bobY = 0;
 
-  if (c.charState === 'grabbed') {
+  if (isHappy) {
+    // 머리를 쓰다듬어줄 때: 자리에서 통통 튀며 기뻐하는 모션
+    const wig = Math.sin(t / 85);
+    tilt = wig * 0.16;
+    squashY = 1 - Math.abs(wig) * 0.1;
+    squashX = 1 + Math.abs(wig) * 0.08;
+    bobY = -Math.abs(Math.sin(t / 170)) * targetH * 0.08;
+  } else if (c.charState === 'grabbed') {
     tilt = Math.sin(t / 500) * 0.05; // 손에 대롱대롱 들려있는 느낌
   } else if (airborne) {
     const stretch = Math.min(0.4, Math.hypot(c.velX, c.velY) / (overlay.height * 0.05));
@@ -1050,7 +1358,6 @@ function drawCharacter(c, t) {
     squashX = 1 - stretch * 0.18 + c.landingSquash * 0.26; // 곧바로 다시 늘어나며 튕겨나가는 반동
     tilt = c.spinAngle; // 날아가는 동안 실제로 데굴데굴 회전
   } else {
-    const walking = Math.abs(c.velX) > 0.3;
     const waddle = walking ? Math.sin(t / 220) : 0;
     squashY = 1 - c.landingSquash * 0.34 + (walking ? Math.abs(waddle) * 0.05 : 0);
     squashX = 1 + c.landingSquash * 0.28 - (walking ? Math.abs(waddle) * 0.04 : 0);
@@ -1058,17 +1365,58 @@ function drawCharacter(c, t) {
   }
 
   ctx.save();
-  ctx.shadowColor = c.charState === 'grabbed' ? getCssVar('--lime') : (airborne ? getCssVar('--magenta') : getCssVar('--cyan'));
-  ctx.shadowBlur = airborne ? 30 : 22;
+  ctx.shadowColor = isHappy ? getCssVar('--lime') : (c.charState === 'grabbed' ? getCssVar('--lime') : (airborne ? getCssVar('--magenta') : getCssVar('--cyan')));
+  ctx.shadowBlur = isHappy ? 36 : (airborne ? 30 : 22);
   ctx.globalAlpha = 0.98;
 
-  ctx.translate(c.charX, c.charY);
+  ctx.translate(c.charX, c.charY + bobY);
   ctx.rotate(tilt);
   // 그림 자체가 화면 거울반전으로 뒤집혀 보이지 않도록 기본 보정(-1)에
   // 이동 방향(facingDir)을 곱해, 이동/비행 방향을 바라보도록 좌우를 전환
   ctx.scale(mirrorSign * c.facingDir * squashX, squashY);
-  ctx.drawImage(c.img, -targetW / 2, -targetH / 2, targetW, targetH);
+
+  if (c.rig) {
+    const state = isHappy ? 'happy' : (airborne ? 'airborne' : (walking ? 'walking' : 'idle'));
+    drawRiggedParts(c, t, state, targetW, targetH);
+  } else {
+    ctx.drawImage(c.img, -targetW / 2, -targetH / 2, targetW, targetH);
+  }
   ctx.restore();
+}
+
+// 리깅된 캐릭터의 몸통과 팔다리를 각각 그림(팔다리는 관절점을 기준으로 회전)
+function drawRiggedParts(c, t, state, targetW, targetH) {
+  const rig = c.rig;
+  ctx.drawImage(rig.body, -targetW / 2, -targetH / 2, targetW, targetH);
+
+  for (const part of rig.parts) {
+    const localPivotX = (part.pivotX / rig.w - 0.5) * targetW;
+    const localPivotY = (part.pivotY / rig.h - 0.5) * targetH;
+    const angle = rigLimbAngle(part.role, part.side, t, state);
+    ctx.save();
+    ctx.translate(localPivotX, localPivotY);
+    ctx.rotate(angle);
+    ctx.translate(-localPivotX, -localPivotY);
+    ctx.drawImage(part.canvas, -targetW / 2, -targetH / 2, targetW, targetH);
+    ctx.restore();
+  }
+}
+
+// 상태(걷기/공중/기쁨/가만히)에 따른 팔다리 각도 - 좌우가 자연스럽게 엇갈리도록 계산
+function rigLimbAngle(role, side, t, state) {
+  const sSign = side === 'L' ? 1 : -1;
+  if (state === 'happy') {
+    return Math.sin(t / 85) * (role === 'arm' ? 0.4 : 0.22) * sSign;
+  }
+  if (state === 'walking') {
+    const phase = Math.sin(t / 220);
+    return role === 'leg' ? phase * 0.5 * sSign : -phase * 0.35 * sSign; // 반대쪽 다리와 팔이 함께 움직이는 자연스러운 보행
+  }
+  if (state === 'airborne') {
+    return Math.sin(t / 150 + (side === 'L' ? 0 : Math.PI)) * (role === 'leg' ? 0.3 : 0.22);
+  }
+  // idle: 숨쉬는 듯한 아주 미세한 흔들림
+  return Math.sin(t / 900 + (side === 'L' ? 0 : Math.PI / 2)) * 0.045;
 }
 
 // 인식된 손 위치에 작은 마커를 표시해 "손이 잘 인식되고 있는지" 눈으로 바로 확인 가능하게 함
@@ -1104,44 +1452,98 @@ function drawHitEffects(t) {
   }
 }
 
+// 머리를 톡톡 쓰다듬으면 캐릭터 머리 위로 하트/반짝임을 몇 개 뿜어냄
+const HAPPY_GLYPHS = ['💗', '✨', '💕', '⭐'];
+function spawnHappyEffect(c, targetW, targetH) {
+  const headX = c.charX;
+  const headY = c.charY - targetH * 0.4;
+  const count = 4 + Math.floor(Math.random() * 2);
+  for (let i = 0; i < count; i++) {
+    happyEffects.push({
+      x: headX + (Math.random() - 0.5) * targetW * 0.5,
+      y: headY,
+      vx: (Math.random() - 0.5) * 0.6,
+      vy: -0.9 - Math.random() * 0.6,
+      t: performance.now() + i * 60, // 살짝 시차를 두고 순서대로 튀어나오게
+      glyph: HAPPY_GLYPHS[Math.floor(Math.random() * HAPPY_GLYPHS.length)],
+      size: 16 + Math.random() * 10,
+    });
+  }
+}
+
+function drawHappyEffects(t) {
+  happyEffects = happyEffects.filter(e => t - e.t <= 900);
+  for (const e of happyEffects) {
+    if (t < e.t) continue; // 아직 생성 시각이 안 된 파티클(시차 스폰)은 이번 프레임엔 건너뜀
+    const p = (t - e.t) / 900;
+    const x = e.x + e.vx * (t - e.t) * 0.15;
+    const y = e.y + e.vy * (t - e.t) * 0.15;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - p);
+    ctx.font = `${e.size}px sans-serif`;
+    ctx.textAlign = 'center';
+    // 부모(camFrame)가 거울반전되어 있으므로 이모지가 뒤집혀 보이지 않도록 보정
+    ctx.translate(x, y);
+    ctx.scale(mirrorSign, 1);
+    ctx.fillText(e.glyph, 0, 0);
+    ctx.restore();
+  }
+}
+
 function getCssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// 손 인식 모델(MediaPipe) 로딩 - 실패해도 앱 전체를 막지 않도록 별도 함수로 분리
+async function loadHandLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
+  const baseModelOptions = {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+    },
+    runningMode: 'VIDEO',
+    numHands: 2,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  };
+  try {
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      ...baseModelOptions,
+      baseOptions: { ...baseModelOptions.baseOptions, delegate: 'GPU' },
+    });
+  } catch (gpuErr) {
+    // 일부 환경(구형 GPU/드라이버, 일부 Safari 버전)에서는 GPU 델리게이트가 실패할 수 있어 CPU로 재시도
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      ...baseModelOptions,
+      baseOptions: { ...baseModelOptions.baseOptions, delegate: 'CPU' },
+    });
+  }
+}
+
+// 화면을 막지 않는 짧은 안내(자동으로 사라짐) - 치명적 오류가 아닌 상황에 사용
+function showTransientNotice(msg, duration = 4500) {
+  errorMsg.textContent = msg;
+  errorBox.classList.add('show', 'transient');
+  setTimeout(() => errorBox.classList.remove('show', 'transient'), duration);
 }
 
 // ---------------- 초기화 ----------------
 async function init() {
   try {
     statusText.textContent = '모델 불러오는 중';
-    await Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-      (async () => {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-        );
-        const baseModelOptions = {
-          baseOptions: {
-            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-          },
-          runningMode: 'VIDEO',
-          numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        };
-        try {
-          handLandmarker = await HandLandmarker.createFromOptions(vision, {
-            ...baseModelOptions,
-            baseOptions: { ...baseModelOptions.baseOptions, delegate: 'GPU' },
-          });
-        } catch (gpuErr) {
-          // 일부 환경(구형 GPU/드라이버)에서는 GPU 델리게이트가 실패할 수 있어 CPU로 재시도
-          handLandmarker = await HandLandmarker.createFromOptions(vision, {
-            ...baseModelOptions,
-            baseOptions: { ...baseModelOptions.baseOptions, delegate: 'CPU' },
-          });
-        }
-      })(),
-    ]);
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+
+    // 손 인식은 실패해도 치명적 오류로 처리하지 않음 - 얼굴인식/캐릭터 자동 움직임은 그대로 동작
+    try {
+      await loadHandLandmarker();
+    } catch (handErr) {
+      console.error('손 인식 모델 로드 실패 - 손 상호작용 없이 계속 진행합니다.', handErr);
+      handLandmarker = null;
+      showTransientNotice('이 브라우저에서는 손 인식 기능을 사용할 수 없어요. 캐릭터는 자동으로만 움직입니다. (Chrome 브라우저 권장)');
+    }
 
     statusText.textContent = '카메라 연결 중';
     await startCamera();
