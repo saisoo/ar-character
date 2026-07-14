@@ -403,6 +403,8 @@ function makeHandTrack() {
     pinchX: 0, pinchY: 0, pinchVX: 0, pinchVY: 0, // 엄지+검지 중간점(집게 동작용) + 속도
     isPinching: false,                  // 엄지-검지가 붙어서 "집는" 모양인지
     isOpenPalm: false,                  // 손가락이 펴진 "손바닥" 모양인지
+    isPointing: false,                  // 검지만 펴고 나머지는 접은 "포인팅" 모양인지
+    fingers: { thumb: false, index: false, middle: false, ring: false, pinky: false },
     pinchRatio: 0, extendedCount: 0,    // 디버그 표시용 원시 수치
     handSize: 60,
     _init: false,
@@ -673,11 +675,20 @@ function updateHandTracks(results, displaySize) {
       const pinchDist = dist2(P[4], P[8]) / handSize;
       const isPinching = pinchDist < 0.62;
 
-      // 손끝이 손목보다 멀리 뻗어있으면 "펴짐"으로 보고, 4개 중 3개 이상 펴져있으면 "오픈팜"
-      const isExtended = (tipIdx, pipIdx) => dist2(wrist, P[tipIdx]) > dist2(wrist, P[pipIdx]) * 1.05;
-      const extendedCount = [[8, 6], [12, 10], [16, 14], [20, 18]]
-        .filter(([tip, pip]) => isExtended(tip, pip)).length;
+      // 손끝이 중간 관절보다 손목에서 더 멀리 뻗어있으면 "펴짐" - 엄지 포함 5개 손가락 각각 판정
+      // (아래 계산은 좌표 몇 개 거리 비교뿐이라 손가락 몇 개를 판정하든 연산량 차이는 무시할 수준)
+      const isExtended = (tipIdx, midIdx) => dist2(wrist, P[tipIdx]) > dist2(wrist, P[midIdx]) * 1.05;
+      const fingers = {
+        thumb: isExtended(4, 2),   // 엄지: 끝(4) vs 뿌리쪽 관절(2)
+        index: isExtended(8, 6),
+        middle: isExtended(12, 10),
+        ring: isExtended(16, 14),
+        pinky: isExtended(20, 18),
+      };
+      const extendedCount = [fingers.index, fingers.middle, fingers.ring, fingers.pinky].filter(Boolean).length;
       const isOpenPalm = extendedCount >= 3 && !isPinching;
+      // 검지만 펴고 나머지는 접은 "포인팅" 자세 - 머리 톡톡 등 정교한 손가락 동작 판정에 사용
+      const isPointing = fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky;
 
       const track = handTracks[slot];
       const smoothing = 0.55;
@@ -705,6 +716,8 @@ function updateHandTracks(results, displaySize) {
 
       track.isPinching = isPinching;
       track.isOpenPalm = isOpenPalm;
+      track.isPointing = isPointing;
+      track.fingers = fingers;            // { thumb, index, middle, ring, pinky } 개별 판정 결과
       track.pinchRatio = pinchDist;       // 디버그 표시용 원시 수치
       track.extendedCount = extendedCount; // 디버그 표시용 원시 수치
       track.handSize = handSize;
@@ -1252,7 +1265,10 @@ function drawHandMarkers(hands, t) {
     ctx.restore();
 
     // 디버그용: 현재 판정 상태를 숫자로 그대로 보여줌(테스트/튜닝 시 원인 파악용)
-    const label = `${hand.isPinching ? 'PINCH' : hand.isOpenPalm ? 'OPEN' : '-'} p:${hand.pinchRatio.toFixed(2)} e:${hand.extendedCount}`;
+    const f = hand.fingers;
+    const fingerStr = `T${f.thumb?1:0}I${f.index?1:0}M${f.middle?1:0}R${f.ring?1:0}P${f.pinky?1:0}`;
+    const gesture = hand.isPinching ? 'PINCH' : hand.isOpenPalm ? 'OPEN' : hand.isPointing ? 'POINT' : '-';
+    const label = `${gesture} ${fingerStr} p:${hand.pinchRatio.toFixed(2)}`;
     ctx.save();
     ctx.font = "11px 'Orbitron', monospace";
     ctx.fillStyle = color;
