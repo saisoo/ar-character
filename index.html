@@ -2,7 +2,10 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>AR 캐릭터 인식 · 그래픽디자인과</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -30,6 +33,10 @@
     color: var(--ink);
     font-family: 'Pretendard', system-ui, sans-serif;
     overflow: hidden;
+    overscroll-behavior: none;      /* iOS/안드로이드에서 화면을 당겼을 때 스크롤/새로고침되는 것 방지 */
+    touch-action: manipulation;     /* 더블탭 확대, 핀치 줌 등 제스처 무력화 */
+    -webkit-user-select: none; user-select: none;   /* 길게 눌러서 텍스트/이미지 선택되는 것 방지 */
+    -webkit-touch-callout: none;    /* iOS에서 길게 눌렀을 때 뜨는 메뉴 방지 */
   }
 
   /* ---------- 배경 그리드 (AR 세계관 연출) ---------- */
@@ -49,8 +56,10 @@
     position: fixed; top: 0; left: 0; right: 0;
     z-index: 20;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 18px 28px;
+    padding: calc(18px + env(safe-area-inset-top)) calc(28px + env(safe-area-inset-right)) 18px calc(28px + env(safe-area-inset-left));
     pointer-events: none;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .brand{
     font-family: 'Orbitron', sans-serif;
@@ -85,9 +94,15 @@
   }
   .cam-frame{
     position: relative;
-    max-width: 100vw; max-height: 100vh;
-    transform: scaleX(-1); /* 거울 모드 */
+    --ar: 1.7778; /* 카메라 스트림의 가로/세로 비율 - JS에서 실제 값으로 갱신됨 */
+    /* 화면 회전/크기 변경에 반응형으로 자동 대응(가로가 넉넉하면 세로 기준, 세로가 넉넉하면 가로 기준) */
+    width: min(100vw, 100vh * var(--ar));   /* dvh 미지원 브라우저를 위한 폴백 */
+    height: min(100vh, 100vw / var(--ar));
+    width: min(100vw, 100dvh * var(--ar));
+    height: min(100dvh, 100vw / var(--ar));
+    transform: scaleX(-1); /* 전면 카메라 거울 모드(후면 카메라 사용 시 JS에서 해제) */
   }
+  .cam-frame.no-mirror{ transform: scaleX(1); }
   video, canvas{
     position: absolute; inset: 0;
     width: 100%; height: 100%;
@@ -120,7 +135,9 @@
 
   /* ---------- 상태 뱃지 ---------- */
   .status-badge{
-    position: fixed; top: 20px; right: 28px;
+    position: fixed;
+    top: calc(20px + env(safe-area-inset-top));
+    right: calc(28px + env(safe-area-inset-right));
     z-index: 20;
     display: flex; align-items: center; gap: 8px;
     padding: 8px 14px;
@@ -142,9 +159,11 @@
 
   /* ---------- 컨트롤 패널 (교사용) ---------- */
   .panel-toggle{
-    position: fixed; bottom: 20px; right: 20px;
+    position: fixed;
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    right: calc(20px + env(safe-area-inset-right));
     z-index: 30;
-    width: 46px; height: 46px;
+    width: 48px; height: 48px;
     border-radius: 50%;
     background: var(--panel);
     border: 1px solid var(--panel-border);
@@ -157,9 +176,15 @@
   .panel-toggle:hover{ color: var(--cyan); border-color: var(--cyan); }
 
   .panel{
-    position: fixed; bottom: 78px; right: 20px;
+    position: fixed;
+    bottom: calc(78px + env(safe-area-inset-bottom));
+    right: calc(20px + env(safe-area-inset-right));
+    left: auto;
     z-index: 30;
     width: 280px;
+    max-width: calc(100vw - 32px);
+    max-height: calc(100dvh - 120px);
+    overflow-y: auto;
     background: var(--panel);
     border: 1px solid var(--panel-border);
     border-radius: 14px;
@@ -191,12 +216,12 @@
   .upload-btn{
     display: flex; align-items: center; justify-content: center;
     width: 100%;
-    padding: 12px;
+    padding: 13px;
     border-radius: 10px;
     border: 1px dashed rgba(0,234,255,0.4);
     background: rgba(0,234,255,0.06);
     color: var(--cyan);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     cursor: pointer;
     transition: 0.2s;
@@ -234,12 +259,12 @@
   }
   .char-item button{
     flex-shrink: 0;
-    width: 22px; height: 22px;
+    width: 30px; height: 30px;   /* 터치로 누르기 편하도록 확대 */
     border-radius: 50%;
     border: 1px solid var(--panel-border);
     background: transparent;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 15px;
     line-height: 1;
     cursor: pointer;
   }
@@ -253,7 +278,8 @@
   .panel-row{ display:flex; gap:8px; margin-top: 10px; }
   .mini-btn{
     flex:1;
-    padding: 9px 0;
+    padding: 12px 0;
+    min-height: 40px;
     border-radius: 8px;
     border: 1px solid var(--panel-border);
     background: transparent;
@@ -317,6 +343,9 @@
     <button class="mini-btn" id="resetBtn">전체 삭제</button>
     <button class="mini-btn" id="fullscreenBtn">전체화면</button>
   </div>
+  <div class="panel-row">
+    <button class="mini-btn" id="switchCameraBtn">카메라 전환</button>
+  </div>
 </div>
 
 <div class="error-box" id="errorBox">
@@ -345,12 +374,17 @@ const charList = document.getElementById('charList');
 const charCountHint = document.getElementById('charCountHint');
 const resetBtn = document.getElementById('resetBtn');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
+const switchCameraBtn = document.getElementById('switchCameraBtn');
 const errorBox = document.getElementById('errorBox');
 const errorMsg = document.getElementById('errorMsg');
 
 const MAX_CHARACTERS = 6;
 let characters = [];        // 등록된 모든 캐릭터(공처럼 물리적으로 움직이는 개체들)
 let nextCharId = 1;
+
+let currentFacingMode = 'user'; // 'user'(전면) | 'environment'(후면) - 태블릿을 후면 카메라로 거치하는 경우 대비
+let mirrorSign = -1;             // 전면 카메라는 거울모드(-1), 후면 카메라는 좌우반전 없음(1)
+let currentStream = null;
 
 let currentBox = null;      // 화면에 실제로 그려지는(보간된) 얼굴 박스 - 캐릭터 위치의 기준이 아니라
                              // 스캔 브라켓 표시 + 캐릭터 최초 등장 위치 참고용으로만 사용
@@ -391,10 +425,36 @@ const HIT_COOLDOWN_MS = 90;        // 같은 캐릭터가 연속 프레임에 �
 panelToggle.addEventListener('click', () => panel.classList.toggle('open'));
 
 fullscreenBtn.addEventListener('click', () => {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(()=>{});
+  const el = document.documentElement;
+  const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  if (!isFullscreen) {
+    const request = el.requestFullscreen || el.webkitRequestFullscreen; // iOS/구형 Safari 대응
+    if (request) {
+      const result = request.call(el);
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    }
   } else {
-    document.exitFullscreen();
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) exit.call(document);
+  }
+});
+
+switchCameraBtn.addEventListener('click', async () => {
+  const prevFacingMode = currentFacingMode;
+  currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+  mirrorSign = currentFacingMode === 'user' ? -1 : 1;
+  camFrame.classList.toggle('no-mirror', currentFacingMode !== 'user');
+  try {
+    await startCamera();
+  } catch (err) {
+    // 전환 실패 시 원래 모드로 되돌리고 카메라를 다시 복구
+    currentFacingMode = prevFacingMode;
+    mirrorSign = currentFacingMode === 'user' ? -1 : 1;
+    camFrame.classList.toggle('no-mirror', currentFacingMode !== 'user');
+    try { await startCamera(); } catch (err2) { /* 복구도 실패하면 에러 메시지만 표시 */ }
+    errorMsg.textContent = '카메라 전환에 실패했어요. 이 기기에는 카메라가 하나만 있을 수 있어요.';
+    errorBox.classList.add('show');
+    setTimeout(() => errorBox.classList.remove('show'), 2500);
   }
 });
 
@@ -469,28 +529,33 @@ function updateCharCountHint(full) {
     : `등록된 캐릭터 ${characters.length}개 (최대 ${MAX_CHARACTERS}개)`;
 }
 
-// ---------------- 카메라 시작 ----------------
+// ---------------- 카메라 시작 (전면/후면 전환 지원, 모바일/태블릿 대응) ----------------
 async function startCamera() {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false
-  });
+  // 카메라를 전환할 때 기존 스트림을 확실히 정지시켜 카메라가 두 번 켜지는 것을 방지
+  if (currentStream) {
+    currentStream.getTracks().forEach(track => track.stop());
+    currentStream = null;
+  }
+
+  const idealConstraints = {
+    video: { facingMode: currentFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  };
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia(idealConstraints);
+  } catch (err) {
+    // 저사양 기기/구형 카메라 등에서 해상도 제약이 실패하는 경우, 제약을 완화해 재시도
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: currentFacingMode }, audio: false });
+  }
+  currentStream = stream;
   video.srcObject = stream;
   await new Promise(resolve => { video.onloadedmetadata = resolve; });
   await video.play();
 
   const vw = video.videoWidth, vh = video.videoHeight;
-  // 비디오 요소가 실제 영상 비율을 그대로 갖도록 하여, 캔버스 좌표 계산을 단순화
-  camFrame.style.aspectRatio = `${vw} / ${vh}`;
-  const winRatio = window.innerWidth / window.innerHeight;
-  const vidRatio = vw / vh;
-  if (vidRatio > winRatio) {
-    camFrame.style.width = '100vw';
-    camFrame.style.height = 'auto';
-  } else {
-    camFrame.style.height = '100vh';
-    camFrame.style.width = 'auto';
-  }
+  // 카메라 실제 비율을 CSS 변수로 전달 - 화면 회전/크기 변경에도 순수 CSS로 자동 대응
+  camFrame.style.setProperty('--ar', (vw / vh).toString());
 
   resizeOverlay();
 }
@@ -501,6 +566,16 @@ function resizeOverlay() {
   overlay.height = rect.height;
 }
 window.addEventListener('resize', resizeOverlay);
+// 모바일 브라우저의 주소창 표시/숨김, 분할화면 등 크기 변화를 폭넓게 감지
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(resizeOverlay).observe(camFrame);
+}
+// 모바일/태블릿 회전 시 치수가 한 박자 늦게 확정되는 경우가 있어 약간의 지연 후 한 번 더 갱신
+window.addEventListener('orientationchange', () => {
+  resizeOverlay();
+  setTimeout(resizeOverlay, 200);
+  setTimeout(resizeOverlay, 500);
+});
 
 // ---------------- 얼굴 + 손(양손) 인식 루프 ----------------
 async function runDetectionLoop() {
@@ -710,9 +785,9 @@ function drawBrackets(box, locked, t) {
   ctx.fillStyle = color;
   ctx.shadowColor = color;
   ctx.shadowBlur = 6;
-  ctx.scale(-1, 1); // 부모가 거울반전이라 텍스트가 뒤집히므로 다시 뒤집어 정방향으로
+  ctx.scale(mirrorSign, 1); // 전면 카메라(거울모드)일 때만 다시 뒤집어 정방향 텍스트로 보정
   const label = locked ? 'LOCKED · 캐릭터 등장' : 'SCANNING...';
-  const labelX = -(bx + bw / 2);
+  const labelX = mirrorSign * (bx + bw / 2);
   ctx.textAlign = 'center';
   ctx.fillText(label, labelX, by - 12);
   ctx.restore();
@@ -991,7 +1066,7 @@ function drawCharacter(c, t) {
   ctx.rotate(tilt);
   // 그림 자체가 화면 거울반전으로 뒤집혀 보이지 않도록 기본 보정(-1)에
   // 이동 방향(facingDir)을 곱해, 이동/비행 방향을 바라보도록 좌우를 전환
-  ctx.scale(-1 * c.facingDir * squashX, squashY);
+  ctx.scale(mirrorSign * c.facingDir * squashX, squashY);
   ctx.drawImage(c.img, -targetW / 2, -targetH / 2, targetW, targetH);
   ctx.restore();
 }
