@@ -157,6 +157,29 @@
   .status-badge.locked{ color: var(--lime); border-color: rgba(182,255,60,0.3); }
   .status-badge.locked .led{ background: var(--lime); box-shadow: 0 0 8px var(--lime); }
 
+  /* ---------- 제스처 안내판 (항상 낮은 불투명도로 표시) ---------- */
+  .gesture-legend{
+    position: fixed;
+    top: calc(64px + env(safe-area-inset-top));
+    left: calc(20px + env(safe-area-inset-left));
+    z-index: 20;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 10px 14px;
+    background: rgba(13,13,22,0.55);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+    opacity: 0.72;
+  }
+  .legend-item{
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .legend-icon{ font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
+
   /* ---------- 컨트롤 패널 (교사용) ---------- */
   .panel-toggle{
     position: fixed;
@@ -319,6 +342,14 @@
   <span id="statusText">카메라 준비 중</span>
 </div>
 
+<div class="gesture-legend" id="gestureLegend">
+  <div class="legend-item"><span class="legend-icon">🤏</span>집게로 집기</div>
+  <div class="legend-item"><span class="legend-icon">✋💨</span>손바닥으로 스매시</div>
+  <div class="legend-item"><span class="legend-icon">👆</span>머리 톡톡 (칭찬)</div>
+  <div class="legend-item"><span class="legend-icon">🤲</span>손바닥 대고 잠깐 쓰다듬기 (졸림)</div>
+  <div class="legend-item"><span class="legend-icon">🖐️⬆</span>손바닥 태우기 (점프)</div>
+</div>
+
 <div class="stage-wrap">
   <div class="cam-frame" id="camFrame">
     <video id="video" autoplay muted playsinline></video>
@@ -328,7 +359,7 @@
 
 <div class="guide" id="guide">
   <div class="big">카메라 앞에 서 보세요</div>
-  <div class="small">엄지+검지로 집어 옮기거나, 손바닥으로 쳐서 날리거나, 손바닥에 태워 점프시키거나, 머리를 톡톡/살살 긁어보세요</div>
+  <div class="small">엄지+검지로 집어 옮기거나, 손바닥으로 쳐서 날리거나, 손바닥에 태워 점프시키거나, 머리를 톡톡/손바닥으로 살짝 쓰다듬어보세요</div>
 </div>
 
 <button class="panel-toggle" id="panelToggle" title="설정">⚙</button>
@@ -417,7 +448,9 @@ let grabByHand = [null, null];      // 각 손이 잡고 있거나 태우고 있
 let hitEffects = [];                // [{ x, y, t }] 때리기 이펙트 표시용(여러 개 동시 가능)
 let happyEffects = [];              // [{x,y,vx,vy,t,glyph}] 기쁨(하트)/졸림(Zzz) 이펙트 공용 배열
 
-const SMASH_SPEED_FACTOR = 0.16;   // 스매시로 인정할 손 속도 - 톡톡/긁기보다 훨씬 빠른 "휙" 스치는 동작만 걸리도록 높게 설정
+const SMASH_SPEED_FACTOR = 0.16;   // 스매시로 인정할 손 속도 - 쓰다듬기보다 훨씬 빠른 "휙" 스치는 동작만 걸리도록 높게 설정
+const PET_SPEED_FACTOR = 0.05;     // 이보다 느리게 손바닥을 대고 있어야 "쓰다듬기"로 인정(스매시와 구분)
+const PET_DWELL_FRAMES = 40;       // 쓰다듬기로 인정되기까지 머물러야 하는 시간(프레임 환산, 약 0.65초)
 const SIZE_FACTOR = 0.26;          // 캐릭터 키 = 화면 높이의 26% (여러 개일 때 겹치지 않게 약간 축소)
 const GRAVITY_FACTOR = 0.0011;     // 중력 = 화면 높이 비율(프레임당)
 const FLOOR_RESTITUTION = 0.55;    // 바닥/벽에 부딪혔을 때 반발 계수(더 통통 튀도록 상향)
@@ -509,9 +542,9 @@ function addCharacterFromFile(file) {
       headPatHistory: [],
       happyUntil: 0,
       patCooldownUntil: 0,
-      scratchHistory: [],
+      pettingDwell: 0,
       sleepyUntil: 0,
-      scratchCooldownUntil: 0,
+      pettingCooldownUntil: 0,
       dizzyUntil: 0,
       rideLiftHistory: [],
     };
@@ -769,7 +802,8 @@ function renderLoop(t) {
   }
   // 2) 캐릭터끼리 서로 반대 방향으로 튕겨나가도록 충돌 처리
   resolveCharacterCollisions();
-  // 3) 그리기
+  // 3) 그리기 (손이 가까워지면 부위별 제스처 가이드가 먼저 옅게 떠오르고, 그 위에 캐릭터를 그림)
+  drawGestureGuides(hands, t);
   for (const c of characters) drawCharacter(c, t);
   drawHandMarkers(hands, t);
   drawHitEffects(t);
@@ -950,12 +984,12 @@ function updateCharacterPhysics(c, t, dt, hands) {
       c.charState = 'pinched';
       c.heldByHand = hi;
       grabByHand[hi] = c.id;
-      c.headPatHistory = []; c.scratchHistory = [];
+      c.headPatHistory = []; c.pettingDwell = 0;
       bounced = true;
       continue;
     }
 
-    // 머리/몸 근처의 섬세한 동작(톡톡/긁기)부터 먼저 판정 - 스매시 속도 기준에 걸려서
+    // 머리/몸 근처의 섬세한 동작(톡톡/쓰다듬기)부터 먼저 판정 - 스매시 속도 기준에 걸려서
     // 반응이 시작되기도 전에 캐릭터가 날아가버리는 것을 방지하기 위해 순서를 바꿈
     const headCenterY = c.charY - targetH * 0.32;
     const headDx = hand.indexX - c.charX, headDy = hand.indexY - headCenterY;
@@ -973,24 +1007,25 @@ function updateCharacterPhysics(c, t, dt, hands) {
       }
     }
 
-    // (c) 손가락으로 긁는 듯한 좌우 움직임 → 꾸벅꾸벅 졸림
-    const scratchZone = dist < collideRadius * 0.8 && !hand.isPinching && !hand.isOpenPalm;
-    if (scratchZone) {
-      c.scratchHistory.push({ t, x: hand.indexX });
-      while (c.scratchHistory.length && t - c.scratchHistory[0].t > 900) c.scratchHistory.shift();
-      if (t > c.scratchCooldownUntil && detectScratchPattern(c.scratchHistory)) {
+    // (c) 손바닥을 편 채로 몸에 살짝 대고 가만히 머무르기(쓰다듬기) → 꾸벅꾸벅 졸림
+    // 오픈팜 자체는 이미 잘 인식되니, 모양이 아니라 "속도"로 스매시와 구분(느리게 대고 있으면 쓰다듬기)
+    const pettingZone = hand.isOpenPalm && !inHeadZone && dist < collideRadius * 0.85
+      && handSpeed < targetW * PET_SPEED_FACTOR;
+    if (pettingZone && c.onGround) {
+      c.pettingDwell += dt;
+      if (t > c.pettingCooldownUntil && c.pettingDwell > PET_DWELL_FRAMES) {
         c.sleepyUntil = t + 2600;
-        c.scratchCooldownUntil = t + 3000;
-        c.scratchHistory = [];
+        c.pettingCooldownUntil = t + 3000;
+        c.pettingDwell = 0;
         spawnSleepyEffect(c, targetW, targetH);
       }
     } else {
-      c.scratchHistory = [];
+      c.pettingDwell = 0;
     }
 
     // (d) 손바닥으로 세게 스침 → 빙글빙글 날아가 여기저기 부딪힘
-    // 머리/몸에 딱 붙어 섬세하게 움직이는 중(톡톡/긁기 구역)이면 스매시로 치지 않음 + 훨씬 빠른 속도만 인정
-    if (hand.isOpenPalm && overlapping && !inHeadZone && !scratchZone
+    // 머리에 딱 붙어 섬세하게 움직이는 중(톡톡 구역)이면 스매시로 치지 않음 + 훨씬 빠른 속도만 인정
+    if (hand.isOpenPalm && overlapping && !inHeadZone
         && handSpeed >= targetW * SMASH_SPEED_FACTOR && t > c.nextHitAllowedAt) {
       const nx = -dx / dist, ny = -dy / dist; // 캐릭터가 밀려날 방향(손 반대쪽)
       const handVX = hand.vx * HAND_VEL_TO_PXFRAME;
@@ -1045,19 +1080,6 @@ function updateCharacterPhysics(c, t, dt, hands) {
 }
 
 // 손끝의 좌우(x) 움직임에서 "긁는" 듯한 빠르고 잦은 방향 전환 패턴을 판단(머리 톡톡보다 더 잦은 변화 요구)
-function detectScratchPattern(history) {
-  if (history.length < 5) return false;
-  let dirChanges = 0, lastDir = 0;
-  for (let i = 1; i < history.length; i++) {
-    const dx = history[i].x - history[i - 1].x;
-    if (Math.abs(dx) < 1.5) continue;
-    const dir = dx > 0 ? 1 : -1;
-    if (lastDir !== 0 && dir !== lastDir) dirChanges++;
-    lastDir = dir;
-  }
-  return dirChanges >= 4;
-}
-
 // 실제 위치 적분(중력/벽/바닥) + idle 어슬렁 로직 - grabbed가 아닐 때만 호출
 function velIntegrate(c, dt, gravity, floorY, targetW, targetH, t) {
   if (c.onGround) {
@@ -1204,7 +1226,7 @@ function drawCharacter(c, t) {
     squashX = 1 + Math.abs(wig) * 0.08;
     bobY = -Math.abs(Math.sin(t / 170)) * targetH * 0.08;
   } else if (isSleepy) {
-    // 살살 긁어줄 때: 꾸벅꾸벅 조는 모션(천천히 고개가 떨어졌다 올라옴)
+    // 손바닥으로 쓰다듬어줄 때: 꾸벅꾸벅 조는 모션(천천히 고개가 떨어졌다 올라옴)
     const nod = (Math.sin(t / 650) + 1) / 2; // 0~1
     tilt = nod * 0.22;
     bobY = nod * targetH * 0.05;
@@ -1242,6 +1264,68 @@ function drawCharacter(c, t) {
 }
 
 // 인식된 손 위치에 작은 마커를 표시해 "손이 잘 인식되고 있는지" 눈으로 바로 확인 가능하게 함
+// 손이 캐릭터의 각 부위(머리/몸통/발밑)에 가까워지면, 어떤 제스처가 가능한 영역인지
+// 반투명 가이드로 보여줌 - 가까울수록 진해지고 멀어지면 옅어져 사라짐(평소엔 화면을 가리지 않음)
+function drawGestureGuides(hands, t) {
+  const activeHands = hands.filter(Boolean);
+  if (!activeHands.length) return;
+
+  for (const c of characters) {
+    if (c.charX === null || c.charState !== 'idle' || !c.onGround) continue;
+    const { targetW, targetH } = getCharSize(c);
+    const headCenterY = c.charY - targetH * 0.32;
+    const headRadius = targetW * 0.32;
+    const bodyRadius = (targetW + targetH) / 4 * 0.95;
+    const feetY = c.charY + targetH * 0.42;
+    const feetRadius = targetW * 0.32;
+
+    // 가장 가까운 손 기준으로 근접도(0=멀다, 1=바로 근처) 계산
+    let nearest = Infinity;
+    for (const h of activeHands) {
+      const dHead = Math.hypot(h.indexX - c.charX, h.indexY - headCenterY) - headRadius;
+      const dBody = Math.hypot(h.smX - c.charX, h.smY - c.charY) - bodyRadius;
+      const dFeet = Math.hypot(h.smX - c.charX, h.smY - feetY) - feetRadius;
+      nearest = Math.min(nearest, dHead, dBody, dFeet);
+    }
+    const proximityRange = targetW * 1.3;
+    const visibility = Math.max(0, Math.min(1, 1 - nearest / proximityRange));
+    if (visibility <= 0.02) continue;
+
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 5]);
+
+    ctx.globalAlpha = visibility * 0.6;
+    ctx.strokeStyle = getCssVar('--lime');
+    ctx.beginPath();
+    ctx.arc(c.charX, headCenterY, headRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = getCssVar('--muted');
+    ctx.beginPath();
+    ctx.arc(c.charX, c.charY, bodyRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.strokeStyle = getCssVar('--cyan');
+    ctx.beginPath();
+    ctx.arc(c.charX, feetY, feetRadius, Math.PI * 0.15, Math.PI * 0.85);
+    ctx.stroke();
+    ctx.restore();
+
+    // 아이콘 라벨 (거울반전 보정)
+    ctx.save();
+    ctx.globalAlpha = visibility * 0.9;
+    ctx.font = '15px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.scale(mirrorSign, 1);
+    ctx.fillText('👆', mirrorSign * c.charX, headCenterY - headRadius - 6);
+    ctx.fillText('🤲', mirrorSign * (c.charX + bodyRadius * 0.75), c.charY + 4);
+    ctx.fillText('🖐️⬆', mirrorSign * c.charX, feetY + feetRadius + 16);
+    ctx.restore();
+  }
+}
+
 function drawHandMarkers(hands, t) {
   hands.forEach((hand) => {
     if (!hand) return;
@@ -1314,7 +1398,7 @@ function spawnHappyEffect(c, targetW, targetH) {
   }
 }
 
-// 손가락으로 긁어줄 때 졸려하는 "Zzz" 이펙트 - 하트 이펙트와 같은 배열/렌더러를 재사용
+// 손바닥으로 쓰다듬어줄 때 졸려하는 "Zzz" 이펙트 - 하트 이펙트와 같은 배열/렌더러를 재사용
 function spawnSleepyEffect(c, targetW, targetH) {
   const x = c.charX + targetW * 0.28;
   const y = c.charY - targetH * 0.35;
