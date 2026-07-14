@@ -846,7 +846,7 @@ function buildCharacterRig(img) {
     if (!graph || graph.nodes.length < 3) return null;
 
     const limbs = rigExtractLimbPaths(graph);
-    const classified = rigClassifyLimbs(limbs, h);
+    const classified = rigClassifyLimbs(limbs, w, h);
     if (classified.length < 2) return null; // 팔다리를 충분히 찾지 못하면 실패 처리
 
     return rigBuildPartCanvases(srcData, alpha, dist, w, h, classified);
@@ -987,13 +987,15 @@ function rigExtractLimbPaths(graph) {
   return limbs;
 }
 
-// 팔다리 후보를 위치 기준으로 팔/다리, 좌/우로 분류 (맨 위쪽 끝은 머리로 보고 제외)
-function rigClassifyLimbs(limbs, h) {
-  const sorted = limbs.slice().sort((a, b) => a.tip.y - b.tip.y);
-  const withoutHead = sorted.length > 2 ? sorted.slice(1) : sorted;
+// 팔다리 후보를 위치/길이 기준으로 걸러내고 팔/다리, 좌/우로 분류
+// - 머리 꼭대기 근처(안테나 머리카락, 리본 등)에서 시작하는 가지는 개수와 무관하게 전부 제외
+// - 너무 짧은 가지(단추, 리본, 옷 장식 등)도 팔다리가 아닌 것으로 보고 제외
+function rigClassifyLimbs(limbs, w, h) {
+  const minLen = Math.max(w, h) * 0.11;
+  const candidates = limbs.filter(l => l.pivot.y > h * 0.22 && l.path.length > minLen);
 
-  const upper = withoutHead.filter(l => l.pivot.y < h * 0.5).sort((a, b) => a.tip.x - b.tip.x);
-  const lower = withoutHead.filter(l => l.pivot.y >= h * 0.5).sort((a, b) => a.tip.x - b.tip.x);
+  const upper = candidates.filter(l => l.pivot.y < h * 0.52).sort((a, b) => a.tip.x - b.tip.x);
+  const lower = candidates.filter(l => l.pivot.y >= h * 0.52).sort((a, b) => a.tip.x - b.tip.x);
 
   const result = [];
   upper.slice(0, 2).forEach((l, i) => result.push({ ...l, role: 'arm', side: i === 0 ? 'L' : 'R' }));
